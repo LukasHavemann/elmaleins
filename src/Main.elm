@@ -24,13 +24,18 @@ main =
 
 
 -- MODEL
--- Maybe because we wan't to allow each at input, which could be empty.
+type alias Guess =
+    { guessedNumber : Maybe Int
+    , correspondingChallenge : Challenge
+    }
 
+type ChallengeType = Result | FactorA | FactorB
 
 type alias Challenge =
-    { faktorA : Maybe Int
-    , faktorB : Maybe Int
-    , result : Maybe Int
+    { factorA : Int
+    , factorB : Int
+    , result : Int
+    , challengeType : ChallengeType
     }
 
 
@@ -40,11 +45,7 @@ type alias FactorPool =
     , changes : String
     }
 
-
-
 -- TODO niels 08.08.2020: Config must become persistent.
-
-
 type alias Config =
     { poolA : FactorPool
     , poolB : FactorPool
@@ -58,15 +59,24 @@ type alias Config =
 type alias Model =
     { config : Config
     , currentChallenge : Maybe Challenge
+    , currentGuessedValue : Maybe Int
     , remainingTime : Int
-    , solvedChallenges : List Challenge
+    , guesses : List Guess
     }
 
 
-getChallenge : Int -> Int -> Challenge
-getChallenge a b =
-    Challenge (Just a) (Just b) Nothing
+createChallenge : Int -> Int -> Challenge
+createChallenge a b = Challenge a b (a * b) Result
 
+createGuess : Maybe Int -> Challenge -> Guess
+createGuess v c = Guess v c
+
+getToBeGuessed : Challenge -> Int
+getToBeGuessed challenge = 
+    case challenge.challengeType of
+        Result -> challenge.result 
+        FactorA -> challenge.factorA
+        FactorB -> challenge.factorB
 
 randomFactor : FactorPool -> Random.Generator Int
 randomFactor factorPool =
@@ -76,10 +86,19 @@ randomFactor factorPool =
 challengeGen : FactorPool -> FactorPool -> Random.Generator Challenge
 challengeGen factorPoolA factorPoolB =
     Random.map2
-        (\a b -> getChallenge a b)
+        (\a b -> createChallenge a b)
         (randomFactor factorPoolA)
         (randomFactor factorPoolB)
 
+
+guessCorrect : Guess -> Bool
+guessCorrect guess =
+    case guess.guessedNumber of 
+        Nothing         -> False
+        Just number     -> (getToBeGuessed guess.correspondingChallenge) == number
+
+guessNotCorrect : Guess -> Bool
+guessNotCorrect guess = not (guessCorrect guess)
 
 init : () -> ( Model, Cmd Msg )
 init _ =
@@ -93,7 +112,7 @@ init _ =
         listB =
             range 10 14
     in
-    ( Model (Config (FactorPool 2 listA "") (FactorPool 1 listB "") 20 False False) Maybe.Nothing 0 []
+    ( Model (Config (FactorPool 2 listA "") (FactorPool 1 listB "") 20 False False) Maybe.Nothing Maybe.Nothing 0 []
     , Cmd.none
     )
 
@@ -107,10 +126,10 @@ type Msg
     | StopChallenges
     | NewChallenge Challenge
     | Tick Challenge Time.Posix
-    | Solved Challenge
+    | Guessed (Maybe Int) Challenge
     | ShowConfig Config
     | HideConfig Config
-    | Result Challenge String
+    | NewGuessedValue String
     | ChangeTimeout String
 
 
@@ -129,31 +148,30 @@ update msg model =
 
         HideConfig config ->
             let
-                newConfig =
-                    { config | show = False }
+                newConfig ={ config | show = False }
             in
             ( { model | config = newConfig }, Cmd.none )
 
         StartChallenges ->
-            ( { model | solvedChallenges = [] }
+            ( { model | guesses = [] }
             , Random.generate NewChallenge (challengeGen model.config.poolA model.config.poolB)
             )
 
         StopChallenges ->
             ( { model | currentChallenge = Nothing }, Cmd.none )
 
-        Result challenge result ->
-            let
-                newChallenge =
-                    Just { challenge | result = String.toInt result }
+        NewGuessedValue  value ->
+            ( { model | currentGuessedValue =  String.toInt value}, Cmd.none )
+
+        Guessed currentGuessedValue currentChallenge ->
+            let 
+                guess = createGuess currentGuessedValue currentChallenge
             in
-            ( { model | currentChallenge = newChallenge }, Cmd.none )
-
-        Solved challenge ->
-            ( { model | currentChallenge = Nothing, solvedChallenges = challenge :: model.solvedChallenges }
-            , if numberOfWrongChallenges (challenge :: model.solvedChallenges) < 3 then
+            ( { model | currentChallenge = Nothing, 
+                        currentGuessedValue = Nothing,
+                        guesses = guess :: model.guesses }
+            , if numberOf guessNotCorrect (guess :: model.guesses) < 3 then
                 Random.generate NewChallenge (challengeGen model.config.poolA model.config.poolB)
-
               else
                 Cmd.none
             )
@@ -166,7 +184,7 @@ update msg model =
         Tick challenge _ ->
             { model | remainingTime = model.remainingTime - 1 }
                 |> (if model.remainingTime <= 1 then
-                        update (Solved challenge)
+                        update (Guessed Nothing challenge)
 
                     else
                         \m -> ( m, Cmd.none )
@@ -176,31 +194,20 @@ update msg model =
 setTimeoutInSeconds : Config -> Maybe Int -> Config
 setTimeoutInSeconds config newTime =
     case newTime of
-        Nothing ->
-            config
-
-        Just time ->
-            { config | timeoutInSeconds = time }
-
+        Nothing     -> config
+        Just time   -> { config | timeoutInSeconds = time }
 
 
 -- SUBSCRIPTIONS
-
-
 subscriptions : Model -> Sub Msg
 subscriptions model =
     case model.currentChallenge of
-        Nothing ->
-            Sub.none
-
-        Just c ->
-            Time.every 1000 (Tick c)
+        Nothing     -> Sub.none
+        Just c      -> Time.every 1000 (Tick c)
 
 
 
 -- VIEW
-
-
 view : Model -> Html Msg
 view model =
     div [ class "container-sm" ]
@@ -299,25 +306,22 @@ showControl model =
 showMaybeChallenge : Model -> Html Msg
 showMaybeChallenge model =
     case model.currentChallenge of
-        Nothing ->
-            text ""
-
-        Just c ->
-            showCurrentChallenge c model.remainingTime
+        Nothing -> text ""
+        Just c  -> showCurrentChallenge c model.remainingTime model.currentGuessedValue
 
 
 
 -- TODO niels 17.08.2020: Reverse must be implememted.
 
 
-showCurrentChallenge : Challenge -> Int -> Html Msg
-showCurrentChallenge challenge remainingTime =
+showCurrentChallenge : Challenge -> Int -> Maybe Int -> Html Msg
+showCurrentChallenge challenge remainingTime currentGuessedValue =
     div [ id "challenge" ]
         [ h2 [] [ text "Aufgabe" ]
         , p [] [ text ("Noch " ++ String.fromInt remainingTime ++ " Sekunden") ]
         , div [ class "input-group", class "input-group-sm", class "mb-3" ]
             [ div [ class "input-group-prepend" ]
-                [ span [ class "input-group-text" ] [ text (maybeIntToString challenge.faktorA ++ " x " ++ maybeIntToString challenge.faktorB ++ " = ") ]
+                [ span [ class "input-group-text" ] [ text ((String.fromInt challenge.factorA) ++ " x " ++ (String.fromInt challenge.factorB) ++ " = ") ]
                 ]
             , input
                 [ type_ "number"
@@ -327,12 +331,12 @@ showCurrentChallenge challenge remainingTime =
                 , size 3
                 , name "result"
                 , attribute "aria-label" "Ergebnis"
-                , value (maybeIntToString challenge.result)
-                , onInput (Result challenge)
+                , value (toStr "" currentGuessedValue)
+                , onInput (NewGuessedValue)
                 ]
                 []
             , div [ class "input-group-append" ]
-                [ button [ type_ "button", class "btn", class "btn-success", name "next", onClick (Solved challenge) ] [ text "Abgeben" ]
+                [ button [ type_ "button", class "btn", class "btn-success", name "next", onClick (Guessed currentGuessedValue challenge) ] [ text "Abgeben" ]
                 ]
             ]
         ]
@@ -340,83 +344,50 @@ showCurrentChallenge challenge remainingTime =
 
 showResults : Model -> Html Msg
 showResults model =
-    if List.isEmpty model.solvedChallenges then
+    if List.isEmpty model.guesses then
         text ""
 
     else
         div [ id "results" ]
             ([ hr [] []
              , h2 [] [ text "Ergebnisse" ]
-             , showSuccessRate model.solvedChallenges
+             , showSuccessRate model.guesses
              ]
-                ++ showSolvedChallenges model.solvedChallenges
+                ++ showGuesses model.guesses
             )
 
 
-showSuccessRate : List Challenge -> Html Msg
-showSuccessRate challenges =
-    p [] [ text (String.fromInt (numberOfCorrectChallenges challenges) ++ " von " ++ String.fromInt (List.length challenges) ++ " Richtig.") ]
+showSuccessRate : List Guess -> Html Msg
+showSuccessRate guesses =
+    p [] [ text (String.fromInt (numberOf guessCorrect guesses) ++ " von " ++ String.fromInt (List.length guesses) ++ " Richtig.") ]
 
 
-showSolvedChallenges : List Challenge -> List (Html Msg)
-showSolvedChallenges challenges =
-    List.map showSolvedChallenge challenges
+showGuesses : List Guess -> List (Html Msg)
+showGuesses guess =
+    List.map showGuess guess
 
 
-showSolvedChallenge : Challenge -> Html Msg
-showSolvedChallenge challenge =
-    if challengeResultCorrect challenge then
+showGuess : Guess -> Html Msg
+showGuess guess =
+    if guessCorrect guess then
         p [ class "alert", class "alert-success", attribute "role" "alert" ]
-            [ text ("Richtig " ++ challengeToString challenge)
-            ]
+            [ text ("Richtig " ++ challengeToString guess.correspondingChallenge) ]
 
     else
         p [ class "alert", class "alert-info", attribute "role" "alert" ]
-            [ text ("Nicht ganz " ++ challengeToString challenge ++ " und nicht " ++ maybeIntToString challenge.result)
-            ]
+            [ text ("Nicht ganz " ++ challengeToString guess.correspondingChallenge ++ " und nicht " ++ toStr "<keine Eingabe>" guess.guessedNumber ) ]
 
 
-numberOfWrongChallenges : List Challenge -> Int
-numberOfWrongChallenges challenges =
-    List.length (List.filter challengeResultWrong challenges)
-
-
-numberOfCorrectChallenges : List Challenge -> Int
-numberOfCorrectChallenges challenges =
-    List.length (List.filter challengeResultCorrect challenges)
-
-
-challengeResultCorrect : Challenge -> Bool
-challengeResultCorrect challenge =
-    Maybe.withDefault 0 challenge.faktorA * Maybe.withDefault 0 challenge.faktorB == Maybe.withDefault -1 challenge.result
-
-
-challengeResultWrong : Challenge -> Bool
-challengeResultWrong challenge =
-    not (challengeResultCorrect challenge)
-
+numberOf: (Guess -> Bool) -> List Guess -> Int
+numberOf filterFunc guesses =
+    List.length (List.filter filterFunc guesses)
 
 challengeToString : Challenge -> String
 challengeToString challenge =
-    maybeIntToString challenge.faktorA ++ " x " ++ maybeIntToString challenge.faktorB ++ " = " ++ maybeIntToString (calcResult challenge)
+    String.fromInt challenge.factorA ++ " x " ++ String.fromInt challenge.factorB ++ " = " ++  String.fromInt challenge.result
 
-
-calcResult : Challenge -> Maybe Int
-calcResult challenge =
-    case ( challenge.faktorA, challenge.faktorB ) of
-        ( Nothing, Nothing ) ->
-            Nothing
-
-        ( Nothing, Just _ ) ->
-            Nothing
-
-        ( Just _, Nothing ) ->
-            Nothing
-
-        ( Just a, Just b ) ->
-            Just (a * b)
-
-
-maybeIntToString : Maybe Int -> String
-maybeIntToString maybeInt =
-    Maybe.withDefault "" (Maybe.map String.fromInt maybeInt)
+toStr : String -> Maybe Int -> String
+toStr default value =
+    case value of
+        Nothing -> default
+        Just v  -> String.fromInt v
